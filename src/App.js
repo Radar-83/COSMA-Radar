@@ -3,10 +3,13 @@ import './App.css';
 import logo from './logo_cosma.png';
 import menuIcon from './menu.png';
 import Select from 'react-select';
+import { loadData, status, runJob, stopJob } from "./api";
+
 
 function App() {
   // États pour les données et les filtres
   const [profiles, setProfiles] = useState([]);
+  const [data, setData] = useState([]);
   const [expandedIndex, setExpandedIndex] = useState(null);
   const [search, setSearch] = useState("");
   const [selectedCountries, setSelectedCountries] = useState([]);
@@ -69,7 +72,48 @@ function App() {
     };
   }, []);
 
-  // Chargement des données
+  // Load the JSON at startup using API function
+  useEffect(() => {
+    loadData()
+      .then(data => {
+        setData(data);
+        const cleaned = (Array.isArray(data) ? data : []).filter(
+          (profile) => profile.company_name && profile.score_global
+        );
+        const uniqueCountries = Array.from(
+          new Set(
+            cleaned
+              .map((p) => {
+                const loc = p.location || "";
+                const parts = loc.split(',').map((s) => s.trim());
+                return parts[parts.length - 1];
+              })
+              .filter((c) => c && c !== "Erreur" && c !== "Non trouvée")
+          )
+        ).sort();
+
+        setCountries(uniqueCountries);
+
+        const uniquePhases = Array.from(new Set(
+          cleaned.flatMap(p => String(p.project_phase || '')
+            .split(/[\/;,]+/)
+            .map(s => s.trim())
+            .filter(Boolean)
+          )
+        )).sort();
+        setPhases(["ALL", ...uniquePhases]);
+        setProfiles(cleaned.sort((a, b) => (b.score_global || 0) - (a.score_global || 0)));
+      })
+      .catch(e => alert("Impossible de charger les données. Assure-toi que le backend tourne. " + e));
+  }, []);
+
+  // Poll status to mirror localhost behavior
+  useEffect(() => {
+    const id = setInterval(() => status().then(setJobStatus).catch(() => {}), 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Chargement des données (fonction de backup si besoin)
   const reloadData = useCallback(async () => {
     try {
       const res = await fetch('/api/data');
@@ -117,65 +161,40 @@ function App() {
   }, []);
 
   useEffect(() => {
-    reloadData();
     fetchDataMeta();
-  }, [reloadData, fetchDataMeta]);
+  }, [fetchDataMeta]);
 
-  // Statut du job (polling)
-  const fetchJobStatus = useCallback(async () => {
-    try {
-      const r = await fetch('/api/status');
-      if (!r.ok) return;
-      const s = await r.json();
-      setJobStatus(s);
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchJobStatus();
-    const id = setInterval(fetchJobStatus, 1500);
-    return () => clearInterval(id);
-  }, [fetchJobStatus]);
-
-  // Exécution du pipeline
+  // Exécution du pipeline using API function
   const runPipeline = async () => {
     setRunning(true);
     setLastRunLog("");
     try {
-      const res = await fetch('/api/run', { method: 'POST' });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `Echec /api/run: ${res.status} ${res.statusText}`);
-      }
-      const body = await res.json();
-      setLastRunLog(`06_Executable lancé avec PID: ${body.pid}`);
+      const res = await runJob();
+      console.log(res);
+      setLastRunLog(`06_Executable lancé avec PID: ${res.pid}`);
       await reloadData();
       await fetchDataMeta();
     } catch (e) {
+      alert(e.message);
       setLastRunLog(String(e));
     } finally {
-      await fetchJobStatus();
       setRunning(false);
     }
   };
 
-  // Arrêter le pipeline
+  // Arrêter le pipeline using API function
   const stopPipeline = async () => {
     try {
-      const res = await fetch('/api/stop', { method: 'POST' });
-      if (res.ok) {
-        const body = await res.json();
-        if (body.stopped) {
-          setLastRunLog(`Process arrêté (PID: ${body.pid})`);
-        } else {
-          setLastRunLog(`Arrêt échoué: ${body.reason}`);
-        }
-        setRunning(false);
-        await fetchJobStatus();
+      const res = await stopJob();
+      console.log(res);
+      if (res.stopped) {
+        setLastRunLog(`Process arrêté (PID: ${res.pid})`);
+      } else {
+        setLastRunLog(`Arrêt échoué: ${res.reason}`);
       }
+      setRunning(false);
     } catch (e) {
+      alert(e.message);
       console.error("Erreur lors de l'arrêt:", e);
       setLastRunLog(`Erreur lors de l'arrêt: ${e}`);
     }

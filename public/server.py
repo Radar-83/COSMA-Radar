@@ -16,12 +16,13 @@ from pydantic import BaseModel
 # Sécurité (CORS + clé d'accès)
 # -----------------------------
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://cosma-radar.pages.dev")
-ACCESS_KEY = os.environ.get("ACCESS_KEY")  # ⚠️ mets une vraie clé longue (env var)
+ACCESS_KEY = os.environ.get("ACCESS_KEY")  # ⚠️ à définir via variable d'env
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "Scored_Enriched_clean.json"
 KEYWORDS_FILE = BASE_DIR / "keywords.txt"
 KEYWORDS_LOCK = threading.Lock()
+
 
 def _read_keywords() -> list[str]:
     """Lit keywords.txt (ignore vides et lignes #commentaires)."""
@@ -35,33 +36,46 @@ def _read_keywords() -> list[str]:
                 out.append(s)
         return out
 
+
 def _write_keywords(kws: list[str]) -> None:
     """Écrit un mot-clé par ligne."""
     with KEYWORDS_FILE.open("w", encoding="utf-8") as f:
         for k in kws:
             f.write(k + "\n")
 
+
 class KeywordPayload(BaseModel):
     keyword: str
 
+
 app = FastAPI(title="Cosma API", version="1.1.0")
 
-# CORS mis à jour : autorise ta page Pages + dev local
+# -----------------------------
+# CORS : production + previews Pages + dev local
+# -----------------------------
+# - allow_origin_regex autorise tout sous-domaine *.cosma-radar.pages.dev (préviews)
+# - allow_origins garde l'origine principale + le local dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[ALLOWED_ORIGIN, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)?cosma-radar\.pages\.dev$",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*", "X-Access-Key", "Content-Type"],
+    expose_headers=["*"],
+    max_age=600,
 )
+
 
 # Guard: vérifie la clé envoyée dans le header X-Access-Key
 def verify_key(x_access_key: str | None = Header(default=None)):
     if ACCESS_KEY and x_access_key != ACCESS_KEY:
         raise HTTPException(status_code=403, detail="forbidden")
 
+
 RUN_PROC: Optional[Popen] = None
 PROC_LOCK = threading.Lock()
+
 
 def find_executable() -> Path:
     """
@@ -80,6 +94,7 @@ def find_executable() -> Path:
             return p
     raise HTTPException(status_code=404, detail="06_Executable introuvable dans 'public/'")
 
+
 def start_job() -> dict:
     """Lance 06_Executable en tâche de fond."""
     global RUN_PROC
@@ -94,6 +109,7 @@ def start_job() -> dict:
             cmd = [str(exe)]
         RUN_PROC = Popen(cmd, cwd=str(BASE_DIR), creationflags=creation_flags)
         return {"pid": RUN_PROC.pid}
+
 
 def stop_job() -> dict:
     """Arrête le process si en cours."""
@@ -120,9 +136,11 @@ def stop_job() -> dict:
         finally:
             RUN_PROC = None
 
+
 def job_status() -> dict:
     running = RUN_PROC is not None and RUN_PROC.poll() is None
     return {"running": running, "pid": RUN_PROC.pid if running else None}
+
 
 # -----------------
 # Endpoints publics
@@ -131,13 +149,16 @@ def job_status() -> dict:
 def healthz():
     return {"ok": True}
 
+
 @app.get("/api/ping")
 def ping():
     return {"status": "ok"}
 
+
 @app.get("/api/status")
 def api_status():
     return job_status()
+
 
 @app.get("/api/data")
 def get_data():
@@ -156,13 +177,16 @@ def get_data():
 def api_run():
     return start_job()
 
+
 @app.post("/api/stop", dependencies=[Depends(verify_key)])
 def api_stop():
     return stop_job()
 
+
 @app.get("/api/keywords")
 def get_keywords():
     return {"keywords": _read_keywords()}
+
 
 @app.post("/api/keywords")
 def add_keyword(payload: KeywordPayload):
@@ -175,6 +199,7 @@ def add_keyword(payload: KeywordPayload):
             kws.append(kw)
             _write_keywords(kws)
     return {"keywords": kws}
+
 
 @app.delete("/api/keywords")
 def delete_keyword(
@@ -190,6 +215,8 @@ def delete_keyword(
         _write_keywords(kws)
     return {"keywords": kws}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
